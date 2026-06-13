@@ -141,11 +141,13 @@ def fetch_providers():
 def get_onboarding_intro() -> str:
     return (
         " Welcome to Well Circle — Addis Ababa's wellness ecosystem.\n\n"
-        "•  AI Concierge: Tell me your goal, budget, or neighbourhood and I'll match you instantly.\n"
-        "•  Circles: Join accountability groups, post daily wins, and track your squad's streaks.\n"
+        "• AI Concierge: Tell me your goal, budget, or neighbourhood and I'll match you instantly.\n"
+        "• Circles: Join accountability groups, post daily wins, and track your squad's streaks.\n"
         "• Pay Direct: Book and pay via Telebirr or M-Pesa — no redirects.\n\n"
         "Try: \"Affordable gym near Bole\" · \"Stress relief under 800 ETB\" · \"Nutritionist in CMC\""
     )
+
+
 @app.post("/ai/concierge", response_model=ConciergeResponse)
 def ai_concierge(req: ConciergeRequest):
 
@@ -163,7 +165,7 @@ def ai_concierge(req: ConciergeRequest):
     providers, data_source = fetch_providers()
 
     # 3. System prompt - scenario-aware, one-to-two sentence recommendation + structured JSON
-      system_prompt = (
+    system_prompt = (
         "You are Well Circle's wellness concierge for Addis Ababa, Ethiopia. "
         "You have a JSON list of providers (gyms, yoga studios, nutritionists, spas, therapists) "
         "with fields: id, name, category, description, location_text, price_range, rating.\n\n"
@@ -182,6 +184,7 @@ def ai_concierge(req: ConciergeRequest):
         'REQUIRED FORMAT: {"reply": "<1-2 sentences ONLY>", "provider_id": "<id or null>", "provider_name": "<name or null>"}\n\n'
         f"Providers:\n{json.dumps(providers)}"
     )
+
     try:
         MAX_HISTORY_TURNS = 6
         trimmed_history = req.history[-MAX_HISTORY_TURNS:]
