@@ -140,7 +140,7 @@ def fetch_providers():
 
 def get_onboarding_intro() -> str:
     return (
-        " Welcome to Well Circle — Addis Ababa's wellness ecosystem.\n\n"
+        "Welcome to Well Circle — Addis Ababa's wellness ecosystem.\n\n"
         "• AI Concierge: Tell me your goal, budget, or neighbourhood and I'll match you instantly.\n"
         "• Circles: Join accountability groups, post daily wins, and track your squad's streaks.\n"
         "• Pay Direct: Book and pay via Telebirr or M-Pesa — no redirects.\n\n"
@@ -151,10 +151,10 @@ def get_onboarding_intro() -> str:
 @app.post("/ai/concierge", response_model=ConciergeResponse)
 def ai_concierge(req: ConciergeRequest):
 
-    # 1. First Message Check - return ONLY the ecosystem intro, skip LLM entirely
+    # 1. First Message Check - frontend handles its own welcome, backend stays silent
     if req.is_first_message:
         return ConciergeResponse(
-            intro=get_onboarding_intro(),
+            intro="",
             reply="",
             provider_id=None,
             provider_name=None,
@@ -164,25 +164,20 @@ def ai_concierge(req: ConciergeRequest):
     # 2. Hybrid fetch: live Supabase with automatic fallback
     providers, data_source = fetch_providers()
 
-    # 3. System prompt - scenario-aware, one-to-two sentence recommendation + structured JSON
+    # 3. System prompt — Advice-First, Concierge Logic
     system_prompt = (
-        "You are Well Circle's wellness concierge for Addis Ababa, Ethiopia. "
-        "You have a JSON list of providers (gyms, yoga studios, nutritionists, spas, therapists) "
-        "with fields: id, name, category, description, location_text, price_range, rating.\n\n"
-        "CLASSIFY the user message into ONE intent and respond:\n\n"
-        "INTENT 1 — General Wellness Question:\n"
-        "  Answer directly in one sentence. In the second sentence, name one relevant provider.\n\n"
-        "INTENT 2 — Place/Service Search:\n"
-        "  Name the single best-match provider, its neighbourhood, and a price in ETB. One or two sentences.\n\n"
-        "INTENT 3 — Off-Topic:\n"
-        "  One sentence declining and redirecting to wellness. Set provider fields to null.\n\n"
-        "ABSOLUTE RULES — NO EXCEPTIONS:\n"
-        "1. 'reply' MUST BE 1-2 SENTENCES MAXIMUM. NEVER MORE. CUT ALL FILLER AND FLUFF.\n"
-        "2. NEVER use greetings, affirmations, or openers ('Sure!', 'Great question', 'Of course').\n"
-        "3. ONLY recommend ONE provider per response.\n"
-        "4. OUTPUT ONLY RAW JSON. NO MARKDOWN. NO CODE FENCES. NO PREAMBLE.\n"
-        'REQUIRED FORMAT: {"reply": "<1-2 sentences ONLY>", "provider_id": "<id or null>", "provider_name": "<name or null>"}\n\n'
-        f"Providers:\n{json.dumps(providers)}"
+        "You are Well Circle's wellness concierge for Addis Ababa. "
+        "Your task is to provide expert, empathetic advice first, and helpful service recommendations second.\n\n"
+        "INTENT-BASED LOGIC:\n"
+        "1. ADVISORY INTENT (Weight, Pain, Stress): Provide a scientifically-backed, actionable tip first. "
+        "If you have a relevant provider, suggest them only after the tip. If no provider fits, omit the provider fields.\n"
+        "2. SEARCH INTENT (Gyms, Yoga, Spas): Direct the user to the best-match provider immediately.\n\n"
+        "ABSOLUTE RULES:\n"
+        "1. REPLY MUST BE 2-3 SENTENCES MAX. No fluff, no 'Hello', no 'I am an AI'.\n"
+        "2. If the user's issue has no clear provider match, set 'provider_id' and 'provider_name' to NULL.\n"
+        "3. OUTPUT ONLY RAW JSON. NO MARKDOWN. NO CODE FENCES.\n"
+        'REQUIRED FORMAT: {"reply": "<Advice + optional recommendation>", "provider_id": "<id or null>", "provider_name": "<name or null>"}\n\n'
+        f"Available Providers: {json.dumps(providers)}"
     )
 
     try:
