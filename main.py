@@ -140,16 +140,12 @@ def fetch_providers():
 
 def get_onboarding_intro() -> str:
     return (
-        "🌿 Welcome to the Well Circle Ecosystem! 🌿\n"
-        "We build consistency through community and direct access. Here is everything you can do right now:\n\n"
-        "🕵️‍♂️ 1. AI Concierge Discovery: Talk directly to me! Tell me what wellness services you need, your area in Addis Ababa, or your ETB budget range, and I will instantly scan our dataset to find your match.\n\n"
-        "👥 2. Accountability Circles: Don't train alone. Switch over to our Community tab to join group circles, share daily milestone updates, and view your squad's active consistency feeds.\n\n"
-        "💳 3. Direct Payments: Found a fitness center, spa, or yoga hub you like? Book seamlessly with integrated Telebirr and M-Pesa mobile push triggers.\n\n"
-        "🔥 4. Daily Check-Ins & Level Ups: Build up your health streak to earn Legacy Points, transition your tier status from 'Seed' up to 'Forest', and earn rewards!\n\n"
-        "💬 To start a consultation, try typing: 'I need a luxury spa package around Bole Atlas' or 'Show me an affordable gym option near Stadium'."
+        " Welcome to Well Circle — Addis Ababa's wellness ecosystem.\n\n"
+        "•  AI Concierge: Tell me your goal, budget, or neighbourhood and I'll match you instantly.\n"
+        "•  Circles: Join accountability groups, post daily wins, and track your squad's streaks.\n"
+        "• Pay Direct: Book and pay via Telebirr or M-Pesa — no redirects.\n\n"
+        "Try: \"Affordable gym near Bole\" · \"Stress relief under 800 ETB\" · \"Nutritionist in CMC\""
     )
-
-
 @app.post("/ai/concierge", response_model=ConciergeResponse)
 def ai_concierge(req: ConciergeRequest):
 
@@ -167,29 +163,25 @@ def ai_concierge(req: ConciergeRequest):
     providers, data_source = fetch_providers()
 
     # 3. System prompt - scenario-aware, one-to-two sentence recommendation + structured JSON
-    system_prompt = (
+      system_prompt = (
         "You are Well Circle's wellness concierge for Addis Ababa, Ethiopia. "
-        "Below is a JSON list of wellness providers (gyms, yoga studios, nutritionists, spas, therapists) "
-        "with id, name, category, description, location_text, price_range, and rating.\n\n"
-        "Classify the user's message into ONE of three intents and respond accordingly:\n\n"
-        "INTENT 1 — General Wellness Question (e.g. 'how do I deal with muscle soreness after a run?'):\n"
-        "  - Sentence 1: answer the question considerately with practical, direct advice.\n"
-        "  - Sentence 2: recommend a relevant provider or provider category from the dataset that can help further, "
-        "and populate 'provider_id' and 'provider_name' with that provider.\n\n"
-        "INTENT 2 — Explicit Place Search (user is looking for a gym, spa, yoga studio, or a budget option):\n"
-        "  - Pick the SINGLE best-matching provider from the dataset based on category, location, or budget.\n"
-        "  - The reply must mention the provider's name, its neighborhood location, and a price reference in ETB.\n\n"
-        "INTENT 3 — Off-Topic (unrelated to health, fitness, or wellness):\n"
-        "  - Politely decline in ONE sentence, stating what you can help with instead.\n"
-        "  - Set 'provider_id' and 'provider_name' to null.\n\n"
-        "CRITICAL RULES (apply to ALL intents):\n"
-        "1. The 'reply' field MUST be EXACTLY one or two sentences maximum. No exceptions. Be punchy, natural, and direct.\n"
-        "2. Only ever recommend ONE provider per response.\n"
-        "3. Output STRICTLY as a valid JSON object. No markdown, no preamble, no code fences.\n"
-        'JSON format: {"reply": "<one to two sentences>", "provider_id": "<id or null>", "provider_name": "<name or null>"}\n\n'
+        "You have a JSON list of providers (gyms, yoga studios, nutritionists, spas, therapists) "
+        "with fields: id, name, category, description, location_text, price_range, rating.\n\n"
+        "CLASSIFY the user message into ONE intent and respond:\n\n"
+        "INTENT 1 — General Wellness Question:\n"
+        "  Answer directly in one sentence. In the second sentence, name one relevant provider.\n\n"
+        "INTENT 2 — Place/Service Search:\n"
+        "  Name the single best-match provider, its neighbourhood, and a price in ETB. One or two sentences.\n\n"
+        "INTENT 3 — Off-Topic:\n"
+        "  One sentence declining and redirecting to wellness. Set provider fields to null.\n\n"
+        "ABSOLUTE RULES — NO EXCEPTIONS:\n"
+        "1. 'reply' MUST BE 1-2 SENTENCES MAXIMUM. NEVER MORE. CUT ALL FILLER AND FLUFF.\n"
+        "2. NEVER use greetings, affirmations, or openers ('Sure!', 'Great question', 'Of course').\n"
+        "3. ONLY recommend ONE provider per response.\n"
+        "4. OUTPUT ONLY RAW JSON. NO MARKDOWN. NO CODE FENCES. NO PREAMBLE.\n"
+        'REQUIRED FORMAT: {"reply": "<1-2 sentences ONLY>", "provider_id": "<id or null>", "provider_name": "<name or null>"}\n\n'
         f"Providers:\n{json.dumps(providers)}"
     )
-
     try:
         MAX_HISTORY_TURNS = 6
         trimmed_history = req.history[-MAX_HISTORY_TURNS:]
