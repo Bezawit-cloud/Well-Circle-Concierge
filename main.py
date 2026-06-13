@@ -211,7 +211,7 @@ def ai_concierge(req: ConciergeRequest):
 
         return ConciergeResponse(
             intro="",
-            reply=parsed.get("reply", "Let's find the best wellness option for you."),
+            reply=parsed.get("reply", ""),
             provider_id=provider_id,
             provider_name=provider_name,
             data_source=data_source,
