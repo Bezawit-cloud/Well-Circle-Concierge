@@ -90,9 +90,15 @@ FALLBACK_PROVIDERS = [
 ]
 
 
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+
 class ConciergeRequest(BaseModel):
     message: str
     is_first_message: bool = False
+    history: list[ChatMessage] = []  # prior turns in this session, oldest first
 
 
 class ConciergeResponse(BaseModel):
@@ -144,13 +150,13 @@ def fetch_providers():
 
 def get_onboarding_intro() -> str:
     return (
-        "🌿 Welcome to the Well Circle Ecosystem! 🌿\n"
+        " Welcome to the Well Circle Ecosystem! \n"
         "We build consistency through community and direct access. Here is everything you can do right now:\n\n"
-        "🕵️‍♂️ 1. AI Concierge Discovery: Talk directly to me! Tell me what wellness services you need, your area in Addis Ababa, or your ETB budget range, and I will instantly scan our dataset to find your match.\n\n"
-        "👥 2. Accountability Circles: Don't train alone. Switch over to our Community tab to join group circles, share daily milestone updates, and view your squad's active consistency feeds.\n\n"
-        "💳 3. Direct Payments: Found a fitness center, spa, or yoga hub you like? Book seamlessly with integrated Telebirr and M-Pesa mobile push triggers.\n\n"
-        "🔥 4. Daily Check-Ins & Level Ups: Build up your health streak to earn Legacy Points, transition your tier status from 'Seed' up to 'Forest', and earn rewards!\n\n"
-        "💬 To start a consultation, try typing: 'I need a luxury spa package around Bole Atlas' or 'Show me an affordable gym option near Stadium'."
+        " 1. AI Concierge Discovery: Talk directly to me! Tell me what wellness services you need, your area in Addis Ababa, or your ETB budget range, and I will instantly scan our dataset to find your match.\n\n"
+        " 2. Accountability Circles: Don't train alone. Switch over to our Community tab to join group circles, share daily milestone updates, and view your squad's active consistency feeds.\n\n"
+        " 3. Direct Payments: Found a fitness center, spa, or yoga hub you like? Book seamlessly with integrated Telebirr and M-Pesa mobile push triggers.\n\n"
+        " 4. Daily Check-Ins & Level Ups: Build up your health streak to earn Legacy Points, transition your tier status from 'Seed' up to 'Forest', and earn rewards!\n\n"
+        " To start a consultation, try typing: 'I need a luxury spa package around Bole Atlas' or 'Show me an affordable gym option near Stadium'."
     )
 
 
@@ -163,31 +169,45 @@ def ai_concierge(req: ConciergeRequest):
     # 2. Onboarding intro on first message only
     intro_message = get_onboarding_intro() if req.is_first_message else ""
 
-    # 3. System prompt - strict one-sentence recommendation + structured JSON
+    # 3. System prompt - one-to-two sentence recommendation + structured JSON
     system_prompt = (
-        "You are Well Circle's wellness concierge for Addis Ababa, Ethiopia. "
-        "A user will describe how they feel, what service they want, or their budget in ETB. "
-        "Below is a JSON list of wellness providers (gyms, yoga studios, nutritionists, spas, therapists) "
-        "with id, name, category, description, location_text, price_range, and rating.\n\n"
-        "CRITICAL RULES:\n"
-        "1. Pick the ONE provider that best matches the user's stated need, location, or budget.\n"
-        "2. Your 'reply' field MUST be EXACTLY ONE OR TWO sentences max. Be punchy, natural, and direct.\n"
-        "3. The sentence MUST mention the provider's name, its location, and a price reference in ETB.\n"
-        "4. If the user's message is unrelated to health, fitness, or wellness, politely state in ONE sentence "
-        "what you can help with, and set 'provider_id' and 'provider_name' to null.\n"
-        "5. Output STRICTLY as a valid JSON object. No markdown, no preamble, no code fences.\n"
-        'JSON format: {"reply": "<exactly one sentence>", "provider_id": "<id or null>", "provider_name": "<name or null>"}\n\n'
-        f"Providers:\n{json.dumps(providers)}"
-    )
+    "You are Well Circle's wellness concierge for Addis Ababa, Ethiopia. "
+    "Below is a JSON list of wellness providers (gyms, yoga studios, nutritionists, spas, therapists) "
+    "with id, name, category, description, location_text, price_range, and rating.\n\n"
+    "Classify the user's message into ONE of three intents and respond accordingly:\n\n"
+    "INTENT 1 — General Wellness Question (e.g. 'how do I deal with muscle soreness after a run?'):\n"
+    "  - Sentence 1: answer the question considerately with practical, direct advice.\n"
+    "  - Sentence 2: recommend a relevant provider or provider category from the dataset that can help further, "
+    "and populate 'provider_id' and 'provider_name' with that provider.\n\n"
+    "INTENT 2 — Explicit Place Search (user is looking for a gym, spa, yoga studio, or a budget option):\n"
+    "  - Pick the SINGLE best-matching provider from the dataset based on category, location, or budget.\n"
+    "  - The reply must mention the provider's name, its neighborhood location, and a price reference in ETB.\n\n"
+    "INTENT 3 — Off-Topic (unrelated to health, fitness, or wellness):\n"
+    "  - Politely decline in ONE sentence, stating what you can help with instead.\n"
+    "  - Set 'provider_id' and 'provider_name' to null.\n\n"
+    "CRITICAL RULES (apply to ALL intents):\n"
+    "1. The 'reply' field MUST be EXACTLY one or two sentences maximum. No exceptions. Be punchy, natural, and direct.\n"
+    "2. Only ever recommend ONE provider per response.\n"
+    "3. Output STRICTLY as a valid JSON object. No markdown, no preamble, no code fences.\n"
+    'JSON format: {"reply": "<one to two sentences>", "provider_id": "<id or null>", "provider_name": "<name or null>"}\n\n'
+    f"Providers:\n{json.dumps(providers)}"
+)
 
     try:
+        # Build message list: system prompt + prior turns (capped) + current message
+        MAX_HISTORY_TURNS = 6  # keep prompt size bounded
+        trimmed_history = req.history[-MAX_HISTORY_TURNS:]
+
+        messages = [{"role": "system", "content": system_prompt}]
+        for turn in trimmed_history:
+            if turn.role in ("user", "assistant"):
+                messages.append({"role": turn.role, "content": turn.content})
+        messages.append({"role": "user", "content": req.message})
+
         response = groq_client.chat.completions.create(
             model="llama-3.1-8b-instant",
             response_format={"type": "json_object"},
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": req.message},
-            ],
+            messages=messages,
             temperature=0.2,
         )
 

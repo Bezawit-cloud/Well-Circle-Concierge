@@ -1,5 +1,3 @@
-
-Concierge · HTML
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -124,32 +122,35 @@ Concierge · HTML
 </style>
 </head>
 <body>
- 
+
 <div class="header">✨ Ask Well Circle</div>
- 
+
 <div class="messages" id="messages">
-  <div class="msg assistant">Hi! Tell me how you're feeling, what you need, or your budget — I'll find the right wellness provider for you in Addis Ababa.</div>
+  <div class="msg assistant">🌿 Hi! Welcome to Well Circle. Tell me what wellness service you need, your neighborhood in Addis Ababa, or your budget range, and I will find your perfect match!</div>
 </div>
- 
+
 <div class="suggestions" id="suggestions">
   <button class="suggestion" onclick="useSuggestion('I am stressed and have 500 ETB')">😩 Stressed, 500 ETB</button>
   <button class="suggestion" onclick="useSuggestion('I want a relaxing massage')">💆 Relaxing massage</button>
   <button class="suggestion" onclick="useSuggestion('I need a nutritionist on a budget')">🥗 Budget nutritionist</button>
 </div>
- 
+
 <div class="input-row">
   <input type="text" id="input" placeholder="Type how you're feeling..." />
   <button id="sendBtn" onclick="sendMessage()">Send</button>
 </div>
- 
+
 <script>
   const API_URL = "https://well-circle-concierge.onrender.com/ai/concierge";
- 
+
   const messagesEl = document.getElementById('messages');
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('sendBtn');
   const suggestionsEl = document.getElementById('suggestions');
- 
+
+  let conversationHistory = []; // {role: 'user'|'assistant', content: string}
+  let isFirstMessage = true;
+
   function addMessage(text, role) {
     const div = document.createElement('div');
     div.className = `msg ${role}`;
@@ -158,7 +159,7 @@ Concierge · HTML
     messagesEl.scrollTop = messagesEl.scrollHeight;
     return div;
   }
- 
+
   function addProviderLink(providerId, providerName) {
     const a = document.createElement('div');
     a.className = 'provider-link';
@@ -178,43 +179,57 @@ Concierge · HTML
     messagesEl.appendChild(a);
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
- 
+
   function useSuggestion(text) {
     inputEl.value = text;
     sendMessage();
   }
- 
+
   async function sendMessage() {
     const text = inputEl.value.trim();
     if (!text) return;
- 
+
     addMessage(text, 'user');
     inputEl.value = '';
     sendBtn.disabled = true;
     suggestionsEl.style.display = 'none';
- 
+
     const typingEl = document.createElement('div');
     typingEl.className = 'typing';
     typingEl.textContent = 'Concierge is thinking...';
     messagesEl.appendChild(typingEl);
     messagesEl.scrollTop = messagesEl.scrollHeight;
- 
+
     try {
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: text }),
+        body: JSON.stringify({
+          message: text,
+          is_first_message: isFirstMessage,
+          history: conversationHistory,
+        }),
       });
- 
+
       if (!res.ok) throw new Error('Request failed');
- 
+
       const data = await res.json();
       typingEl.remove();
+
+      if (data.intro) {
+        addMessage(data.intro, 'assistant');
+      }
       addMessage(data.reply, 'assistant');
- 
+
       if (data.provider_id && data.provider_name) {
         addProviderLink(data.provider_id, data.provider_name);
       }
+
+      // Update local history with clean text only (not full JSON payload)
+      conversationHistory.push({ role: 'user', content: text });
+      conversationHistory.push({ role: 'assistant', content: data.reply });
+
+      isFirstMessage = false;
     } catch (err) {
       typingEl.remove();
       addMessage("Sorry, I couldn't reach the concierge right now. Please try again.", 'assistant');
@@ -223,11 +238,11 @@ Concierge · HTML
       sendBtn.disabled = false;
     }
   }
- 
+
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendMessage();
   });
- 
+
   // Apply Telegram theme if available
   if (window.Telegram && window.Telegram.WebApp) {
     window.Telegram.WebApp.ready();
@@ -237,6 +252,6 @@ Concierge · HTML
     }
   }
 </script>
- 
+
 </body>
 </html>
