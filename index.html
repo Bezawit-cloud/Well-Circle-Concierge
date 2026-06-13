@@ -125,9 +125,8 @@
 
 <div class="header">✨ Ask Well Circle</div>
 
-<div class="messages" id="messages">
-  <div class="msg assistant">🌿 Hi! Welcome to Well Circle. Tell me what wellness service you need, your neighborhood in Addis Ababa, or your budget range, and I will find your perfect match!</div>
-</div>
+<!-- RULE 1: Empty on load. No hardcoded greeting. -->
+<div class="messages" id="messages"></div>
 
 <div class="suggestions" id="suggestions">
   <button class="suggestion" onclick="useSuggestion('I am stressed and have 500 ETB')">😩 Stressed, 500 ETB</button>
@@ -148,8 +147,9 @@
   const sendBtn = document.getElementById('sendBtn');
   const suggestionsEl = document.getElementById('suggestions');
 
-  let conversationHistory = []; // {role: 'user'|'assistant', content: string}
+  // RULE 4: isFirstMessage starts true, flips to false after first successful transaction
   let isFirstMessage = true;
+  let conversationHistory = []; // {role: 'user'|'assistant', content: string}
 
   function addMessage(text, role) {
     const div = document.createElement('div');
@@ -165,15 +165,12 @@
     a.className = 'provider-link';
     a.textContent = `View ${providerName} →`;
     a.onclick = () => {
-      // Send a message to parent window (Telegram Mini App host) for navigation
-      // Team: adjust this to your actual routing mechanism
       if (window.parent) {
         window.parent.postMessage({
           type: 'navigate_to_provider',
           provider_id: providerId
         }, '*');
       }
-      // Fallback for standalone testing
       console.log('Navigate to provider:', providerId, providerName);
     };
     messagesEl.appendChild(a);
@@ -185,27 +182,32 @@
     sendMessage();
   }
 
-  async function sendMessage() {
-    const text = inputEl.value.trim();
-    if (!text) return;
-
-    addMessage(text, 'user');
-    inputEl.value = '';
-    sendBtn.disabled = true;
-    suggestionsEl.style.display = 'none';
-
+  function showTyping() {
     const typingEl = document.createElement('div');
     typingEl.className = 'typing';
     typingEl.textContent = 'Concierge is thinking...';
     messagesEl.appendChild(typingEl);
     messagesEl.scrollTop = messagesEl.scrollHeight;
+    return typingEl;
+  }
+
+  /**
+   * Core transaction function. Sends a message to the backend and processes
+   * the response using strict conditional split routing (RULE 3).
+   *
+   * @param {string} userText - The text to send as `message`.
+   * @param {boolean} displayUserBubble - Whether to render userText as a user bubble
+   *                                       (false for the silent __init__ call).
+   */
+  async function sendToBackend(userText, displayUserBubble) {
+    const typingEl = showTyping();
 
     try {
       const res = await fetch(API_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: text,
+          message: userText,
           is_first_message: isFirstMessage,
           history: conversationHistory,
         }),
@@ -216,41 +218,74 @@
       const data = await res.json();
       typingEl.remove();
 
-      if (data.intro) {
+      // RULE 3: Strict conditional split routing - never render both fields
+      if (data.intro && data.intro.trim().length > 0) {
         addMessage(data.intro, 'assistant');
-      }
-      addMessage(data.reply, 'assistant');
 
+        // Onboarding turn: don't pollute history with the huge intro text
+        if (displayUserBubble) {
+          conversationHistory.push({ role: 'user', content: userText });
+        }
+      } else if (data.reply && data.reply.trim().length > 0) {
+        addMessage(data.reply, 'assistant');
+
+        if (displayUserBubble) {
+          conversationHistory.push({ role: 'user', content: userText });
+        }
+        conversationHistory.push({ role: 'assistant', content: data.reply });
+      }
+
+      // RULE 5: Robust provider link handling
       if (data.provider_id && data.provider_name) {
         addProviderLink(data.provider_id, data.provider_name);
       }
 
-      // Update local history with clean text only (not full JSON payload)
-      conversationHistory.push({ role: 'user', content: text });
-      conversationHistory.push({ role: 'assistant', content: data.reply });
-
+      // RULE 4: Flip state after successful transaction
       isFirstMessage = false;
+
     } catch (err) {
       typingEl.remove();
       addMessage("Sorry, I couldn't reach the concierge right now. Please try again.", 'assistant');
       console.error(err);
-    } finally {
-      sendBtn.disabled = false;
     }
+  }
+
+  async function sendMessage() {
+    const text = inputEl.value.trim();
+    if (!text) return;
+
+    addMessage(text, 'user');
+    inputEl.value = '';
+    sendBtn.disabled = true;
+    suggestionsEl.style.display = 'none';
+
+    await sendToBackend(text, true);
+
+    sendBtn.disabled = false;
   }
 
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') sendMessage();
   });
 
-  // Apply Telegram theme if available
-  if (window.Telegram && window.Telegram.WebApp) {
-    window.Telegram.WebApp.ready();
-    const theme = window.Telegram.WebApp.themeParams;
-    for (const [key, value] of Object.entries(theme)) {
-      document.documentElement.style.setProperty(`--tg-theme-${key.replace(/_/g, '-')}`, value);
+  // RULE 2: Automatic onboarding trigger on load.
+  // Silent fetch with is_first_message: true, message: "__init__".
+  // No user bubble is rendered for this initialization call.
+  window.addEventListener('DOMContentLoaded', () => {
+    // Apply Telegram theme if available
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.ready();
+      const theme = window.Telegram.WebApp.themeParams;
+      for (const [key, value] of Object.entries(theme)) {
+        document.documentElement.style.setProperty(`--tg-theme-${key.replace(/_/g, '-')}`, value);
+      }
     }
-  }
+
+    sendBtn.disabled = true;
+    sendToBackend("__init__", false).finally(() => {
+      sendBtn.disabled = false;
+    });
+  });
 </script>
 
 </body>
