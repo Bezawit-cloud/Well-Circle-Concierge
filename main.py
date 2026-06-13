@@ -141,9 +141,9 @@ def fetch_providers():
 def get_onboarding_intro() -> str:
     return (
         " Welcome to Well Circle — Addis Ababa's wellness ecosystem.\n\n"
-        "• AI Concierge: Tell me your goal, budget, or neighbourhood and I'll match you instantly.\n"
-        "• Circles: Join accountability groups, post daily wins, and track your squad's streaks.\n"
-        "• Pay Direct: Book and pay via Telebirr or M-Pesa — no redirects.\n\n"
+        "•  AI Concierge: Tell me your goal, budget, or neighbourhood and I'll match you instantly.\n"
+        "•  Circles: Join accountability groups, post daily wins, and track your squad's streaks.\n"
+        "•  Pay Direct: Book and pay via Telebirr or M-Pesa — no redirects.\n\n"
         "Try: \"Affordable gym near Bole\" · \"Stress relief under 800 ETB\" · \"Nutritionist in CMC\""
     )
 
@@ -164,7 +164,7 @@ def ai_concierge(req: ConciergeRequest):
     # 2. Hybrid fetch: live Supabase with automatic fallback
     providers, data_source = fetch_providers()
 
-    # 3. System prompt - scenario-aware, one-to-two sentence recommendation + structured JSON
+    # 3. System prompt - scenario-aware, 1-2 sentence reply + structured JSON
     system_prompt = (
         "You are Well Circle's wellness concierge for Addis Ababa, Ethiopia. "
         "You have a JSON list of providers (gyms, yoga studios, nutritionists, spas, therapists) "
