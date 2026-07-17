@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import uuid
 import logging
 
 from fastapi import FastAPI
@@ -40,6 +41,9 @@ GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "320"))
 GROQ_TIMEOUT_SECONDS = float(os.getenv("GROQ_TIMEOUT_SECONDS", "20"))
 PROVIDER_CACHE_TTL_SECONDS = float(os.getenv("PROVIDER_CACHE_TTL_SECONDS", "60"))
+
+# NEW: how many past messages (user + assistant, combined) to remember per session.
+MEMORY_MAX_MESSAGES = int(os.getenv("MEMORY_MAX_MESSAGES", "5"))
 
 if not GROQ_API_KEY or not SUPABASE_URL or not SUPABASE_KEY:
     logger.warning("Missing environment configuration variables — running in degraded mode")
@@ -123,6 +127,11 @@ class ChatMessage(BaseModel):
 
 class ConciergeRequest(BaseModel):
     message: str
+    # NEW: client-provided session id. Optional — server will generate one
+    # if missing and hand it back in the response.
+    session_id: str | None = None
+    # Kept for backward compatibility with older clients. Only used to seed
+    # a brand-new session that has no server-side memory yet.
     history: list[ChatMessage] = []
 
 
@@ -131,9 +140,66 @@ class ConciergeResponse(BaseModel):
     provider_id: str | None = None
     provider_name: str | None = None
     data_source: str = "unknown"
+    # NEW: echoed/generated session id so the client can persist it.
+    session_id: str = ""
 
 
 _provider_cache = {"data": None, "source": None, "ts": 0.0}
+
+# --- NEW: SESSION MEMORY (last N messages) ---------------------------------
+# Fast in-process cache: session_id -> list[{"role": ..., "content": ...}]
+# Backed by a Supabase table (chat_memory) so memory survives restarts and
+# works across multiple server instances.
+_session_memory_cache: dict[str, list[dict]] = {}
+
+
+def _memory_table_get(session_id: str) -> list[dict] | None:
+    if supabase_client is None:
+        return None
+    try:
+        res = (
+            supabase_client.table("chat_memory")
+            .select("messages")
+            .eq("session_id", session_id)
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            return res.data[0].get("messages") or []
+        return None
+    except Exception:
+        logger.exception("Supabase read failed for session %s", session_id)
+        return None
+
+
+def _memory_table_upsert(session_id: str, messages: list[dict]) -> None:
+    if supabase_client is None:
+        return
+    try:
+        supabase_client.table("chat_memory").upsert(
+            {"session_id": session_id, "messages": messages}
+        ).execute()
+    except Exception:
+        logger.exception("Supabase write failed for session %s", session_id)
+
+
+def get_session_history(session_id: str) -> list[dict]:
+    if session_id in _session_memory_cache:
+        return _session_memory_cache[session_id]
+
+    stored = _memory_table_get(session_id)
+    if stored is None:
+        stored = []
+
+    _session_memory_cache[session_id] = stored
+    return stored
+
+
+def save_session_history(session_id: str, messages: list[dict]) -> None:
+    trimmed = messages[-MEMORY_MAX_MESSAGES:]
+    _session_memory_cache[session_id] = trimmed
+    _memory_table_upsert(session_id, trimmed)
+# --- END NEW SECTION --------------------------------------------------------
 
 
 def fetch_providers():
@@ -255,6 +321,9 @@ FALLBACK_REPLY = (
 @app.post("/ai/concierge", response_model=ConciergeResponse)
 def ai_concierge(req: ConciergeRequest):
 
+    # NEW: resolve/generate the session id for this conversation.
+    session_id = req.session_id or str(uuid.uuid4())
+
     # Every message goes straight to the LLM matching engine.
     # Welcome/onboarding text is owned entirely by the frontend now.
     providers, data_source = get_providers()
@@ -262,13 +331,21 @@ def ai_concierge(req: ConciergeRequest):
     system_prompt = build_system_prompt(providers)
 
     try:
-        MAX_HISTORY_TURNS = 6
-        trimmed_history = req.history[-MAX_HISTORY_TURNS:]
+        # NEW: pull server-side memory instead of trusting client-sent history.
+        stored_history = get_session_history(session_id)
+
+        # Seed brand-new sessions from client-sent history, if any (backward compat).
+        if not stored_history and req.history:
+            MAX_HISTORY_TURNS = 6
+            trimmed_client_history = req.history[-MAX_HISTORY_TURNS:]
+            stored_history = [
+                {"role": turn.role, "content": turn.content}
+                for turn in trimmed_client_history
+                if turn.role in ("user", "assistant")
+            ][-MEMORY_MAX_MESSAGES:]
 
         messages = [{"role": "system", "content": system_prompt}]
-        for turn in trimmed_history:
-            if turn.role in ("user", "assistant"):
-                messages.append({"role": turn.role, "content": turn.content})
+        messages.extend(stored_history)
         messages.append({"role": "user", "content": req.message})
 
         response = groq_client.chat.completions.create(
@@ -288,11 +365,19 @@ def ai_concierge(req: ConciergeRequest):
         if not isinstance(reply, str) or not reply.strip():
             reply = FALLBACK_REPLY
 
+        # NEW: save this turn to session memory, trimmed to the last N messages.
+        updated_history = stored_history + [
+            {"role": "user", "content": req.message},
+            {"role": "assistant", "content": reply},
+        ]
+        save_session_history(session_id, updated_history)
+
         return ConciergeResponse(
             reply=reply,
             provider_id=provider_id,
             provider_name=provider_name,
             data_source=data_source,
+            session_id=session_id,
         )
 
     except json.JSONDecodeError:
@@ -305,6 +390,7 @@ def ai_concierge(req: ConciergeRequest):
         provider_id=None,
         provider_name=None,
         data_source=data_source,
+        session_id=session_id,
     )
 
 
