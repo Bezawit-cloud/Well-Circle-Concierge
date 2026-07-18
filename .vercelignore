@@ -1,0 +1,23 @@
+# Virtual environments — never deploy
+.venv/
+venv/
+env/
+ENV/
+
+# Tests and dev dependencies
+test_main.py
+requirements-dev.txt
+.pytest_cache/
+
+# Docs — reference only, not runtime
+docs/
+
+# Frontend widget — the main WellCircle app has its own component
+index.html
+
+# Git metadata
+.git/
+
+# Caches
+__pycache__/
+*.pyc
