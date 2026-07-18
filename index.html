@@ -151,6 +151,10 @@
   let isFirstMessage = true;
   let conversationHistory = []; // {role: 'user'|'assistant', content: string}
 
+  // NEW: persisted session id so the backend can remember the last few
+  // turns of this conversation across reloads of the mini app.
+  let sessionId = localStorage.getItem('wellcircle_session_id') || null;
+
   function addMessage(text, role) {
     const div = document.createElement('div');
     div.className = `msg ${role}`;
@@ -210,6 +214,7 @@
           message: userText,
           is_first_message: isFirstMessage,
           history: conversationHistory,
+          session_id: sessionId, // NEW: server-side memory key
         }),
       });
 
@@ -217,6 +222,13 @@
 
       const data = await res.json();
       typingEl.remove();
+
+      // NEW: persist whatever session_id the backend assigned/echoed so
+      // the next message keeps using the same remembered conversation.
+      if (data.session_id && data.session_id !== sessionId) {
+        sessionId = data.session_id;
+        localStorage.setItem('wellcircle_session_id', sessionId);
+      }
 
       // RULE 3: Strict conditional split routing - never render both fields
       if (data.intro && data.intro.trim().length > 0) {

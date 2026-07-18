@@ -1,6 +1,7 @@
 import os
 import json
 import time
+import uuid
 import logging
 
 from fastapi import FastAPI
@@ -36,21 +37,17 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY")
 
-# Small, fast Groq model by default; overridable without a code change.
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
-# Cap generation so a runaway response can't blow up latency. Replies are
-# 2-3 sentences, so this is generous headroom.
 GROQ_MAX_TOKENS = int(os.getenv("GROQ_MAX_TOKENS", "320"))
-# Fail fast instead of hanging the user if Groq is slow/unreachable.
 GROQ_TIMEOUT_SECONDS = float(os.getenv("GROQ_TIMEOUT_SECONDS", "20"))
-# How long provider data is cached in-memory before we re-hit Supabase.
 PROVIDER_CACHE_TTL_SECONDS = float(os.getenv("PROVIDER_CACHE_TTL_SECONDS", "60"))
+
+# NEW: how many past messages (user + assistant, combined) to remember per session.
+MEMORY_MAX_MESSAGES = int(os.getenv("MEMORY_MAX_MESSAGES", "5"))
 
 if not GROQ_API_KEY or not SUPABASE_URL or not SUPABASE_KEY:
     logger.warning("Missing environment configuration variables — running in degraded mode")
 
-# --- CLIENT INITIALIZATION -------------------------------------------------
-# max_retries=1 keeps failures fast (the default of 2 adds latency on errors).
 groq_client = Groq(
     api_key=GROQ_API_KEY or "fallback_placeholder",
     timeout=GROQ_TIMEOUT_SECONDS,
@@ -60,12 +57,10 @@ groq_client = Groq(
 try:
     supabase_client: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 except Exception as e:
-    # Usually just missing config in local/degraded runs — keep it to one line.
     logger.warning("Supabase client init failed (%s) — falling back to local dataset", e)
     supabase_client = None
 
 
-# --- LOCAL FALLBACK DATASET ------------------------------------------------
 FALLBACK_PROVIDERS = [
     {
         "id": "fb-001",
@@ -114,9 +109,6 @@ FALLBACK_PROVIDERS = [
     },
 ]
 
-# Only these fields are ever sent to the model. Keeping the payload small and
-# allow-listed makes the call faster (fewer tokens) and stops internal DB
-# columns from leaking into the prompt.
 PROMPT_FIELDS = (
     "id",
     "name",
@@ -129,30 +121,88 @@ PROMPT_FIELDS = (
 
 
 class ChatMessage(BaseModel):
-    role: str  # "user" or "assistant"
+    role: str
     content: str
 
 
 class ConciergeRequest(BaseModel):
     message: str
-    is_first_message: bool = False
-    history: list[ChatMessage] = []  # prior turns in this session, oldest first
+    # NEW: client-provided session id. Optional — server will generate one
+    # if missing and hand it back in the response.
+    session_id: str | None = None
+    # Kept for backward compatibility with older clients. Only used to seed
+    # a brand-new session that has no server-side memory yet.
+    history: list[ChatMessage] = []
 
 
 class ConciergeResponse(BaseModel):
-    intro: str = ""
     reply: str
     provider_id: str | None = None
     provider_name: str | None = None
-    data_source: str = "unknown"  # "live" or "fallback"
+    data_source: str = "unknown"
+    # NEW: echoed/generated session id so the client can persist it.
+    session_id: str = ""
 
 
-# --- PROVIDER DATA (with TTL cache) ----------------------------------------
 _provider_cache = {"data": None, "source": None, "ts": 0.0}
+
+# --- NEW: SESSION MEMORY (last N messages) ---------------------------------
+# Fast in-process cache: session_id -> list[{"role": ..., "content": ...}]
+# Backed by a Supabase table (chat_memory) so memory survives restarts and
+# works across multiple server instances.
+_session_memory_cache: dict[str, list[dict]] = {}
+
+
+def _memory_table_get(session_id: str) -> list[dict] | None:
+    if supabase_client is None:
+        return None
+    try:
+        res = (
+            supabase_client.table("chat_memory")
+            .select("messages")
+            .eq("session_id", session_id)
+            .limit(1)
+            .execute()
+        )
+        if res.data:
+            return res.data[0].get("messages") or []
+        return None
+    except Exception:
+        logger.exception("Supabase read failed for session %s", session_id)
+        return None
+
+
+def _memory_table_upsert(session_id: str, messages: list[dict]) -> None:
+    if supabase_client is None:
+        return
+    try:
+        supabase_client.table("chat_memory").upsert(
+            {"session_id": session_id, "messages": messages}
+        ).execute()
+    except Exception:
+        logger.exception("Supabase write failed for session %s", session_id)
+
+
+def get_session_history(session_id: str) -> list[dict]:
+    if session_id in _session_memory_cache:
+        return _session_memory_cache[session_id]
+
+    stored = _memory_table_get(session_id)
+    if stored is None:
+        stored = []
+
+    _session_memory_cache[session_id] = stored
+    return stored
+
+
+def save_session_history(session_id: str, messages: list[dict]) -> None:
+    trimmed = messages[-MEMORY_MAX_MESSAGES:]
+    _session_memory_cache[session_id] = trimmed
+    _memory_table_upsert(session_id, trimmed)
+# --- END NEW SECTION --------------------------------------------------------
 
 
 def fetch_providers():
-    """Fetch providers from Supabase, falling back to the local dataset."""
     if supabase_client is not None:
         try:
             db_response = supabase_client.table("providers").select("*").execute()
@@ -168,11 +218,6 @@ def fetch_providers():
 
 
 def get_providers():
-    """Return providers, served from a short-lived in-memory cache.
-
-    Avoids a Supabase round-trip on every single chat turn, which is the main
-    avoidable latency on free-tier hosting.
-    """
     now = time.monotonic()
     if (
         _provider_cache["data"] is not None
@@ -186,21 +231,10 @@ def get_providers():
 
 
 def compact_providers(providers):
-    """Project to the allow-listed fields the model is allowed to see."""
     return [
         {k: p[k] for k in PROMPT_FIELDS if k in p}
         for p in providers
     ]
-
-
-def get_onboarding_intro() -> str:
-    return (
-        "Welcome to Well Circle — Addis Ababa's wellness ecosystem.\n\n"
-        "• AI Concierge: Tell me your goal, budget, or neighbourhood and I'll match you instantly.\n"
-        "• Circles: Join accountability groups, post daily wins, and track your squad's streaks.\n"
-        "• Pay Direct: Book and pay via Telebirr or M-Pesa — no redirects.\n\n"
-        "Try: \"Affordable gym near Bole\" · \"Stress relief under 800 ETB\" · \"Nutritionist in CMC\""
-    )
 
 
 @app.get("/")
@@ -220,16 +254,8 @@ def health():
 
 
 def _resolve_provider(parsed: dict, providers: list) -> tuple[str | None, str | None]:
-    """Ground the model's provider choice against real data.
-
-    The model's `provider_name` is never trusted: we accept its `provider_id`
-    only if it exists in the dataset, then look up the *authoritative* name from
-    that record. Anything unknown is dropped entirely. This is the core
-    anti-hallucination guard.
-    """
     provider_id = parsed.get("provider_id")
 
-    # Normalise common "no match" shapes the model emits.
     if isinstance(provider_id, str):
         provider_id = provider_id.strip()
         if provider_id.lower() in ("", "null", "none"):
@@ -245,25 +271,40 @@ def _resolve_provider(parsed: dict, providers: list) -> tuple[str | None, str | 
         logger.info("Model returned unknown provider_id %r — dropping it", provider_id)
         return None, None
 
-    # Use the real name from our data, not whatever the model wrote.
     return provider_id, name_by_id[provider_id]
 
 
-# Everything except the provider data, which is appended at request time. Built
-# by concatenation (not str.format) so the literal JSON example braces are safe.
+# Merges three behaviors requested:
+#   - Wellness-only scope with a polite redirect for off-topic questions
+#   - Exact, never-rounded price quoting straight from the database
+#   - Every reply ends with a short open-ended question to keep the user engaged
 SYSTEM_PROMPT_PREFIX = (
-    "You are Well Circle's wellness concierge for Addis Ababa. "
-    "Your task is to provide expert, empathetic advice first, and helpful service recommendations second.\n\n"
-    "INTENT-BASED LOGIC:\n"
-    "1. ADVISORY INTENT (Weight, Pain, Stress): Provide a scientifically-backed, actionable tip first. "
-    "If you have a relevant provider, suggest them only after the tip. If no provider fits, omit the provider fields.\n"
-    "2. SEARCH INTENT (Gyms, Yoga, Spas): Direct the user to the best-match provider immediately.\n\n"
+    "You are the Well Circle Concierge, a friendly and knowledgeable wellness expert for Addis Ababa.\n\n"
+    "CORE GUIDELINES:\n"
+    "1. WELLNESS SCOPE: Anchor every response to wellness services. If the user asks something unrelated "
+    "to wellness (sports, weather, jokes, general trivia), politely redirect them back to your purpose in "
+    "a warm, natural way, then invite them to describe what wellness service they're looking for.\n"
+    "2. DATABASE PRIORITY: Always check the Available Providers list first. If a provider matches the "
+    "user's stated category, location, or budget, recommend that exact provider using its EXACT id.\n"
+    "3. EXACT DATA RETRIEVAL: When quoting price, quote the provider's price_range EXACTLY as it appears "
+    "in the data. Never round, estimate, or invent a number. If the user gives a budget, only treat a "
+    "provider as a match if their price_range plausibly fits that budget.\n"
+    "4. CONSULTATIVE FALLBACK: If no provider in the list is a genuine match, do not invent one. Instead, "
+    "give brief, general, accurate wellness guidance relevant to their request, then invite them to refine "
+    "their ask (neighbourhood, budget, or service type). Set provider_id and provider_name to null in this case.\n"
+    "5. ADVISORY INTENT (pain, stress, weight, general health questions): give a short, practical, "
+    "evidence-based tip first, THEN suggest a relevant provider only if one genuinely fits.\n"
+    "6. SEARCH INTENT (explicitly looking for a gym, spa, yoga studio, etc.): lead directly with the "
+    "best-match provider from the data.\n"
+    "7. ENGAGING ENDING: End your 'reply' with a short, relevant, open-ended question that keeps the "
+    "conversation moving (e.g. asking about budget, neighbourhood, or whether they'd like to see the provider).\n\n"
     "ABSOLUTE RULES:\n"
-    "1. REPLY MUST BE 2-3 SENTENCES MAX. No fluff, no 'Hello', no 'I am an AI'.\n"
-    "2. ONLY recommend a provider that appears in the Available Providers list below, and use its EXACT id. "
-    "If nothing in the list genuinely fits, set 'provider_id' and 'provider_name' to null. Never invent providers.\n"
+    "1. REPLY MUST BE 2-4 SENTENCES MAX, including the closing question. No filler greetings like "
+    "'Hello' or 'I am an AI'.\n"
+    "2. ONLY recommend a provider that appears in the Available Providers list below, using its EXACT id. "
+    "If nothing genuinely fits, set 'provider_id' and 'provider_name' to null. Never invent providers or prices.\n"
     "3. OUTPUT ONLY RAW JSON. NO MARKDOWN. NO CODE FENCES.\n"
-    'REQUIRED FORMAT: {"reply": "<Advice + optional recommendation>", "provider_id": "<id or null>", "provider_name": "<name or null>"}\n\n'
+    'REQUIRED FORMAT: {"reply": "<advice/recommendation + closing question>", "provider_id": "<id or null>", "provider_name": "<name or null>"}\n\n'
     "Available Providers: "
 )
 
@@ -280,30 +321,31 @@ FALLBACK_REPLY = (
 @app.post("/ai/concierge", response_model=ConciergeResponse)
 def ai_concierge(req: ConciergeRequest):
 
-    # 1. First Message Check - frontend handles its own welcome, backend stays silent
-    if req.is_first_message:
-        return ConciergeResponse(
-            intro="",
-            reply="",
-            provider_id=None,
-            provider_name=None,
-            data_source="n/a",
-        )
+    # NEW: resolve/generate the session id for this conversation.
+    session_id = req.session_id or str(uuid.uuid4())
 
-    # 2. Hybrid fetch: cached live Supabase data with automatic fallback
+    # Every message goes straight to the LLM matching engine.
+    # Welcome/onboarding text is owned entirely by the frontend now.
     providers, data_source = get_providers()
 
-    # 3. System prompt — Advice-First, Concierge Logic (compact, grounded payload)
     system_prompt = build_system_prompt(providers)
 
     try:
-        MAX_HISTORY_TURNS = 6
-        trimmed_history = req.history[-MAX_HISTORY_TURNS:]
+        # NEW: pull server-side memory instead of trusting client-sent history.
+        stored_history = get_session_history(session_id)
+
+        # Seed brand-new sessions from client-sent history, if any (backward compat).
+        if not stored_history and req.history:
+            MAX_HISTORY_TURNS = 6
+            trimmed_client_history = req.history[-MAX_HISTORY_TURNS:]
+            stored_history = [
+                {"role": turn.role, "content": turn.content}
+                for turn in trimmed_client_history
+                if turn.role in ("user", "assistant")
+            ][-MEMORY_MAX_MESSAGES:]
 
         messages = [{"role": "system", "content": system_prompt}]
-        for turn in trimmed_history:
-            if turn.role in ("user", "assistant"):
-                messages.append({"role": turn.role, "content": turn.content})
+        messages.extend(stored_history)
         messages.append({"role": "user", "content": req.message})
 
         response = groq_client.chat.completions.create(
@@ -321,15 +363,21 @@ def ai_concierge(req: ConciergeRequest):
 
         reply = parsed.get("reply") or ""
         if not isinstance(reply, str) or not reply.strip():
-            # Model gave us structured-but-empty output; don't render a blank bubble.
             reply = FALLBACK_REPLY
 
+        # NEW: save this turn to session memory, trimmed to the last N messages.
+        updated_history = stored_history + [
+            {"role": "user", "content": req.message},
+            {"role": "assistant", "content": reply},
+        ]
+        save_session_history(session_id, updated_history)
+
         return ConciergeResponse(
-            intro="",
             reply=reply,
             provider_id=provider_id,
             provider_name=provider_name,
             data_source=data_source,
+            session_id=session_id,
         )
 
     except json.JSONDecodeError:
@@ -338,11 +386,11 @@ def ai_concierge(req: ConciergeRequest):
         logger.exception("AI processing error")
 
     return ConciergeResponse(
-        intro="",
         reply=FALLBACK_REPLY,
         provider_id=None,
         provider_name=None,
         data_source=data_source,
+        session_id=session_id,
     )
 
 
